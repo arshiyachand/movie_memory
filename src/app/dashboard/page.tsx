@@ -4,6 +4,9 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import LogoutButton from "./LogoutButton";
 import FactCard from "./FactCard";
+import EditFavoriteMovie from "./EditFavoriteMovie";
+import { getLatestFact } from "@/lib/factService";
+import { normalizeMovieTitle } from "@/lib/validation";
 
 export default async function DashboardPage() {
   const session = await auth();
@@ -18,11 +21,6 @@ export default async function DashboardPage() {
       email: true,
       image: true,
       favoriteMovie: true,
-      facts: {
-        orderBy: { createdAt: "desc" },
-        take: 1,
-        select: { content: true, createdAt: true },
-      },
     },
   });
 
@@ -34,8 +32,13 @@ export default async function DashboardPage() {
   }
 
   const displayName = user.name?.trim() || user.email || "there";
-  const latestFact = user.facts[0]
-    ? { content: user.facts[0].content, createdAt: user.facts[0].createdAt.toISOString() }
+  // Only a fact about the *current* favorite movie is shown.
+  const stored = await getLatestFact(
+    session.user.id,
+    normalizeMovieTitle(user.favoriteMovie),
+  );
+  const latestFact = stored
+    ? { content: stored.content, createdAt: stored.createdAt.toISOString() }
     : null;
 
   return (
@@ -70,10 +73,16 @@ export default async function DashboardPage() {
 
       <div className="rounded-xl border border-black/10 p-5 dark:border-white/20">
         <p className="text-sm text-foreground/60">Favorite movie</p>
-        <p className="mt-1 text-lg font-medium">{user.favoriteMovie}</p>
+        <div className="mt-1">
+          <EditFavoriteMovie movie={user.favoriteMovie} />
+        </div>
       </div>
 
-      <FactCard movie={user.favoriteMovie} initialFact={latestFact} />
+      <FactCard
+        key={user.favoriteMovie}
+        movie={user.favoriteMovie}
+        initialFact={latestFact}
+      />
     </main>
   );
 }

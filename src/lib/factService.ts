@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { generateMovieFact } from "@/lib/openai";
 import { logger, errorFields } from "@/lib/logger";
+import { normalizeMovieTitle } from "@/lib/validation";
 
 // A stored fact is served straight from cache if it's younger than this.
 export const CACHE_WINDOW_MS = 60_000;
@@ -48,8 +49,12 @@ export async function getOrGenerateFact(userId: string): Promise<FactResult> {
   if (!user.favoriteMovie) {
     return { status: "no_movie" };
   }
+  const movie = normalizeMovieTitle(user.favoriteMovie);
 
-  let latestFact = await latestFactFor(userId);
+  // Only facts about the *current* favorite movie count, both for the cache
+  // and for the fallback on failure, so editing the movie can never surface a
+  // fact about the wrong film.
+  let latestFact = await getLatestFact(userId, movie);
   if (latestFact && isFresh(latestFact)) {
     log("cache_hit", { source: "initial" });
     return { status: "fresh", fact: latestFact };
@@ -86,15 +91,23 @@ export async function getOrGenerateFact(userId: string): Promise<FactResult> {
     // generating (and released the lock) between our first read and our
     // acquiring it; without this we'd produce a second fact inside the same
     // 60s window.
-    latestFact = await latestFactFor(userId);
+    latestFact = await getLatestFact(userId, movie);
     if (latestFact && isFresh(latestFact)) {
       log("cache_hit", { source: "after_lock" });
       return { status: "fresh", fact: latestFact };
     }
 
-    const content = await generateMovieFact(user.favoriteMovie, GENERATION_BUDGET_MS);
+    const content = await generateMovieFact(movie, GENERATION_BUDGET_MS);
+
+    // The user may have edited their movie while OpenAI was working. Don't
+    // store or return a fact about the old film.
+    if (await movieChanged(userId, movie)) {
+      log("movie_changed_during_generation");
+      return { status: "in_progress", fact: null };
+    }
+
     const fact = await prisma.fact.create({
-      data: { userId, content },
+      data: { userId, content, movie },
       select: { content: true, createdAt: true },
     });
     log("fact_generated");
@@ -119,12 +132,22 @@ function isFresh(fact: FactRecord): boolean {
   return Date.now() - fact.createdAt.getTime() < CACHE_WINDOW_MS;
 }
 
-function latestFactFor(userId: string): Promise<FactRecord | null> {
+/** Latest fact for this user about this movie (case-insensitive match). */
+export function getLatestFact(userId: string, movie: string): Promise<FactRecord | null> {
   return prisma.fact.findFirst({
-    where: { userId },
+    where: { userId, movie: { equals: movie, mode: "insensitive" } },
     orderBy: { createdAt: "desc" },
     select: { content: true, createdAt: true },
   });
+}
+
+async function movieChanged(userId: string, movie: string): Promise<boolean> {
+  const current = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { favoriteMovie: true },
+  });
+  const now = current?.favoriteMovie ? normalizeMovieTitle(current.favoriteMovie) : null;
+  return now?.toLowerCase() !== movie.toLowerCase();
 }
 
 /**

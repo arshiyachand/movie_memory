@@ -7,6 +7,7 @@ vi.mock("@/lib/prisma", () => ({
   prisma: {
     user: {
       findUniqueOrThrow: vi.fn(),
+      findUnique: vi.fn(),
       updateMany: vi.fn(),
       update: vi.fn(),
     },
@@ -45,6 +46,9 @@ const USER_ID = "user-1";
 
 function mockUser(favoriteMovie: string | null = "The Matrix") {
   mockPrisma.user.findUniqueOrThrow.mockResolvedValue({ favoriteMovie } as never);
+  // Re-read after generation to detect a mid-flight movie edit: by default
+  // the movie is unchanged.
+  mockPrisma.user.findUnique.mockResolvedValue({ favoriteMovie } as never);
 }
 
 
@@ -196,6 +200,56 @@ describe("getOrGenerateFact — lock correctness", () => {
     const result = await getOrGenerateFact(USER_ID);
 
     expect(result.status).toBe("generated");
+  });
+});
+
+describe("getOrGenerateFact — favorite movie awareness", () => {
+  it("only reads and writes facts for the user's current movie", async () => {
+    mockUser("The Matrix");
+    mockPrisma.fact.findFirst.mockResolvedValue(null);
+    mockPrisma.user.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockGenerateMovieFact.mockResolvedValue("fact");
+    mockPrisma.fact.create.mockResolvedValue({ content: "fact", createdAt: new Date() } as never);
+
+    await getOrGenerateFact(USER_ID);
+
+    expect(mockPrisma.fact.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { userId: USER_ID, movie: { equals: "The Matrix", mode: "insensitive" } },
+      }),
+    );
+    expect(mockPrisma.fact.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { userId: USER_ID, content: "fact", movie: "The Matrix" } }),
+    );
+  });
+
+  it("normalizes the stored title (trim + collapse spaces) before comparing and generating", async () => {
+    mockUser("  The    Matrix ");
+    mockPrisma.fact.findFirst.mockResolvedValue(null);
+    mockPrisma.user.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockGenerateMovieFact.mockResolvedValue("fact");
+    mockPrisma.fact.create.mockResolvedValue({ content: "fact", createdAt: new Date() } as never);
+
+    await getOrGenerateFact(USER_ID);
+
+    expect(mockGenerateMovieFact).toHaveBeenCalledWith("The Matrix", GENERATION_BUDGET_MS);
+  });
+
+  it("discards the result if the movie was edited while OpenAI was working", async () => {
+    mockUser("The Matrix");
+    mockPrisma.fact.findFirst.mockResolvedValue(null);
+    mockPrisma.user.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockGenerateMovieFact.mockImplementation(async () => {
+      // The user edits their movie during the OpenAI call.
+      mockPrisma.user.findUnique.mockResolvedValue({ favoriteMovie: "Inception" } as never);
+      return "a fact about The Matrix";
+    });
+
+    const result = await getOrGenerateFact(USER_ID);
+
+    expect(result).toEqual({ status: "in_progress", fact: null });
+    expect(mockPrisma.fact.create).not.toHaveBeenCalled();
+    expectLockReleasedByOwner();
   });
 });
 

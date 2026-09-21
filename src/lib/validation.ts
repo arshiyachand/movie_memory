@@ -5,12 +5,20 @@ export type MovieValidationResult =
   | { ok: true; value: string }
   | { ok: false; error: string };
 
-/** Server-side validation for the favorite-movie field: trim, then enforce length. */
+/** Trim and collapse runs of whitespace, so "The   Matrix " equals "The Matrix". */
+export function normalizeMovieTitle(raw: string): string {
+  return raw.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * Server-side validation for the favorite-movie field: normalize, then
+ * enforce length. The returned value is what gets stored and compared.
+ */
 export function validateMovieTitle(raw: unknown): MovieValidationResult {
   if (typeof raw !== "string") {
     return { ok: false, error: "Please enter a movie title." };
   }
-  const value = raw.trim();
+  const value = normalizeMovieTitle(raw);
   if (value.length < MOVIE_MIN_LENGTH) {
     return { ok: false, error: "Please enter a movie title." };
   }

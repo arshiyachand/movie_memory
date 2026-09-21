@@ -62,8 +62,9 @@ model User {
   emailVerified DateTime?
   image         String?
 
-  // Set during onboarding. Null/undefined means the user hasn't onboarded yet,
-  // which is what /onboarding vs /dashboard routing checks.
+  // Set during onboarding (editable later from the dashboard). Null/undefined
+  // means the user hasn't onboarded yet, which is what /onboarding vs
+  // /dashboard routing checks.
   favoriteMovie String?
 
   // Postgres-backed "generation in progress" lock for the fact-generation
@@ -86,6 +87,13 @@ model Fact {
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   content String
+
+  // The (normalized) favorite movie this fact was generated for. The cache and
+  // fallback only ever use facts whose movie matches the user's *current*
+  // favoriteMovie, so editing the movie can never surface a fact about the
+  // wrong film. Nullable only because rows created before this column existed
+  // are backfilled by the migration; new rows always set it.
+  movie String?
 
   createdAt DateTime @default(now())
 
