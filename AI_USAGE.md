@@ -28,5 +28,10 @@ The list of improvements was planned by the author; Claude Code implemented them
 
 **Not verified**
 
-- The GitHub Actions workflow has not been run on GitHub yet.
-- The Google sign-in round trip, onboarding, and the dashboard UI (skeleton, polling, edit control) were not exercised in a browser during this round. The polling logic is unit-tested as a plain function, but there is no browser-level test.
+- The GitHub Actions workflow had not been run on GitHub when this note was written; check the Actions tab for its current status.
+- After this round the author ran the app locally and tried it by hand in a browser. There are still no automated browser or auth-flow tests: the Google OAuth round trip is only exercised manually, and the polling logic is unit-tested as a plain function rather than through the UI.
+
+## Local run and debugging
+
+- Claude Code started the dev server and Prisma Studio for manual testing. When sign-in failed with an Auth.js `AdapterError`, it read the server log, found the cause (`PrismaClientKnownRequestError` on `session.findUnique`) and confirmed nothing was listening on `localhost:5432`. It then started a Postgres container with the credentials from `.env` and ran `prisma migrate deploy`, rather than guessing at the auth config.
+- The session-lifetime answer (30 days idle, 24-hour refresh) was read from the installed `@auth/core` source, not assumed. It is now documented in the README.

@@ -22,7 +22,8 @@ tradeoffs involved).
   Supabase/Neon/Railway)
 - A Google Cloud OAuth client
 - An OpenAI API key
-- Docker (only for the integration tests)
+- Docker (for the integration tests, and the easiest way to get a local dev
+  database — see below)
 
 ### Install
 
@@ -56,15 +57,33 @@ Copy `.env.example` to `.env` and fill in:
 None of these secrets are ever sent to the browser — they're only read in
 server-side code (`route.ts` handlers, server components, server actions).
 
+### Local database (optional)
+
+If you don't have Postgres running, start one on port 5432 that matches the
+`DATABASE_URL` example above (`docker-compose.yml` is only the throwaway test
+database on port 5433, not this one):
+
+```bash
+docker run -d --name movie-memory-dev-db \
+  -e POSTGRES_USER=movie_memory -e POSTGRES_PASSWORD=<your password> \
+  -e POSTGRES_DB=movie_memory -p 5432:5432 \
+  -v movie-memory-dev-data:/var/lib/postgresql/data postgres:16-alpine
+```
+
+Use the same user, password and database name in `DATABASE_URL`. Without a
+reachable database, sign-in fails with an Auth.js `AdapterError` on the first
+session lookup.
+
 ### Database migration
 
 ```bash
-npx prisma migrate dev
+npx prisma migrate dev      # development: applies migrations, generates the client
+npx prisma migrate deploy   # production / CI: applies existing migrations only
 ```
 
 This applies the migrations in `prisma/migrations/` and generates the Prisma
 Client. Tables: `User`, `Account`, `Session`, `VerificationToken`, `Fact`,
-`RateLimit`.
+`RateLimit`. To browse the data locally, run `npx prisma studio`.
 
 ### Run
 
@@ -106,6 +125,13 @@ opaque session-token cookie, and every `auth()` call looks it up in Postgres.
 The trade-off: a database read per request, in exchange for server-side
 revocation (delete the row and the session is gone immediately, which a
 signed JWT can't do before it expires).
+
+Session lifetime is the Auth.js default, not configured here: a session
+expires after **30 days idle**, and any request at most once every 24 hours
+pushes the expiry out another 30 days (`maxAge` / `updateAge` in the
+`session` option of `src/lib/auth.ts` change this). Google's own access and
+refresh tokens sit in the `Account` table but don't affect the app's session,
+since Google is only used to identify the user at sign-in.
 
 Routing logic lives in the pages themselves rather than in Next.js's
 `proxy.ts` (called `middleware.ts` before Next 16):
@@ -391,7 +417,7 @@ seam where it would plug in:
 
 ---
 
-## 5. What I'd still improve
+## 5. What I'd improve with 2 more hours
 
 - **Per-request `Retry-After` from OpenAI** is ignored (we use our own
   backoff under a hard budget so the lock invariant holds). Honoring it when
