@@ -162,6 +162,20 @@ A stale lock (`generationStartedAt` older than 15s) is treated as abandoned,
 so a crashed request can't permanently wedge future generations for that
 user.
 
+**Timing invariant: generation must finish before the lock can go stale.**
+If an OpenAI call could outlive `LOCK_STALE_MS`, a second request would see
+the lock as abandoned, take it, and fire a duplicate call while the first is
+still running — exactly what the lock exists to prevent. The OpenAI SDK's own
+defaults break this: it retries twice, each attempt gets a full timeout, and
+it honors `Retry-After` for up to 60s, so a struggling call can take 30s+.
+So the SDK's retries are turned off (`maxRetries: 0`) and
+`src/lib/retry.ts` retries transient errors (connection errors/timeouts,
+408, 409, 429, 5xx) itself under one total budget. That budget,
+`GENERATION_BUDGET_MS`, is derived in `factService.ts` as
+`LOCK_STALE_MS - 5s`, so it is shorter than the stale window by construction,
+and a unit test asserts it. Each attempt's timeout shrinks to the budget
+remaining, so the last retry cannot overrun the deadline.
+
 ---
 
 ## 3. Why Variant A, and the locking tradeoff
@@ -233,8 +247,14 @@ Option 2 was implemented as the best balance of correctness and simplicity.
 - **Integration tests against a real Postgres** (e.g. via a Testcontainers
   instance) to verify the atomic-update race behavior under actual
   concurrent load, rather than only unit-testing the logic against mocks.
-- **Retry-with-backoff** on transient OpenAI errors before falling back to
-  cache, since a single timeout currently gives up immediately.
+- **Compare-and-delete lock release.** `clearLock` clears the lock
+  unconditionally; if a holder ever outlived the stale window (e.g. a DB
+  stall after OpenAI returned), it could release someone else's lock. Storing
+  a per-acquisition token and clearing only if it still matches would close
+  that.
+- **Re-check the cache after winning the lock**, so a request that read a
+  stale fact just before another finished generating doesn't produce a second
+  fact within the 60s window.
 
 ## Known limitations
 

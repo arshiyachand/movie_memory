@@ -9,6 +9,16 @@ export const CACHE_WINDOW_MS = 60_000;
 // allowed to retry instead of being blocked forever.
 export const LOCK_STALE_MS = 15_000;
 
+// Slack for the work after OpenAI returns (insert Fact, clear lock) and for
+// clock differences between instances.
+const LOCK_SAFETY_MARGIN_MS = 5_000;
+
+// Total time OpenAI generation (all retries included) may take. Derived from
+// LOCK_STALE_MS so it is always shorter than it: if generation could outlive
+// the lock, a second request would consider the lock abandoned, take it, and
+// make a duplicate OpenAI call while the first is still running.
+export const GENERATION_BUDGET_MS = LOCK_STALE_MS - LOCK_SAFETY_MARGIN_MS;
+
 export type FactRecord = { content: string; createdAt: Date };
 
 export type FactResult =
@@ -62,7 +72,7 @@ export async function getOrGenerateFact(userId: string): Promise<FactResult> {
   }
 
   try {
-    const content = await generateMovieFact(user.favoriteMovie);
+    const content = await generateMovieFact(user.favoriteMovie, GENERATION_BUDGET_MS);
     const fact = await prisma.fact.create({
       data: { userId, content },
       select: { content: true, createdAt: true },

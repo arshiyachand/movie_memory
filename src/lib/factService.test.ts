@@ -23,7 +23,12 @@ vi.mock("@/lib/openai", () => ({
 
 import { prisma } from "@/lib/prisma";
 import { generateMovieFact } from "@/lib/openai";
-import { getOrGenerateFact, CACHE_WINDOW_MS } from "@/lib/factService";
+import {
+  getOrGenerateFact,
+  CACHE_WINDOW_MS,
+  LOCK_STALE_MS,
+  GENERATION_BUDGET_MS,
+} from "@/lib/factService";
 
 const mockPrisma = vi.mocked(prisma, true);
 const mockGenerateMovieFact = vi.mocked(generateMovieFact);
@@ -71,7 +76,7 @@ describe("getOrGenerateFact — 60s cache window", () => {
 
     const result = await getOrGenerateFact(USER_ID);
 
-    expect(mockGenerateMovieFact).toHaveBeenCalledWith("The Matrix");
+    expect(mockGenerateMovieFact).toHaveBeenCalledWith("The Matrix", GENERATION_BUDGET_MS);
     expect(result.status).toBe("generated");
     expect(mockPrisma.user.update).toHaveBeenCalledWith({
       where: { id: USER_ID },
@@ -132,6 +137,14 @@ describe("getOrGenerateFact — generation-in-progress guard", () => {
       },
       data: { generationStartedAt: expect.any(Date) },
     });
+  });
+});
+
+describe("generation budget vs. lock staleness", () => {
+  it("keeps the total OpenAI budget strictly shorter than the stale-lock window", () => {
+    // If generation (retries included) could outlive the lock, a second
+    // request could take the lock over mid-flight and duplicate the call.
+    expect(GENERATION_BUDGET_MS).toBeLessThan(LOCK_STALE_MS);
   });
 });
 
