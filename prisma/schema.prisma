@@ -101,3 +101,16 @@ model Fact {
   // cache check and the dashboard, so index userId + createdAt together.
   @@index([userId, createdAt])
 }
+
+// Fixed-window rate limit counters (see src/lib/rateLimit.ts). One row per
+// (key, window): the window number is baked into `key`, so a new window is a
+// new row and old rows just expire and get purged. Incremented with a single
+// atomic INSERT ... ON CONFLICT DO UPDATE, so it is correct across any number
+// of server instances.
+model RateLimit {
+  key       String   @id
+  count     Int
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
