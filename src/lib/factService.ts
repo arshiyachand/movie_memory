@@ -44,8 +44,8 @@ export async function getOrGenerateFact(userId: string): Promise<FactResult> {
     return { status: "no_movie" };
   }
 
-  const latestFact = await latestFactFor(userId);
-  if (latestFact && Date.now() - latestFact.createdAt.getTime() < CACHE_WINDOW_MS) {
+  let latestFact = await latestFactFor(userId);
+  if (latestFact && isFresh(latestFact)) {
     return { status: "fresh", fact: latestFact };
   }
 
@@ -56,13 +56,14 @@ export async function getOrGenerateFact(userId: string): Promise<FactResult> {
   // write and no longer matches. That single conditional UPDATE is what
   // makes this safe across multiple server instances without app-level
   // locking.
-  const staleBefore = new Date(Date.now() - LOCK_STALE_MS);
+  const lockedAt = new Date();
+  const staleBefore = new Date(lockedAt.getTime() - LOCK_STALE_MS);
   const { count } = await prisma.user.updateMany({
     where: {
       id: userId,
       OR: [{ generationStartedAt: null }, { generationStartedAt: { lt: staleBefore } }],
     },
-    data: { generationStartedAt: new Date() },
+    data: { generationStartedAt: lockedAt },
   });
 
   if (count === 0) {
@@ -72,23 +73,35 @@ export async function getOrGenerateFact(userId: string): Promise<FactResult> {
   }
 
   try {
+    // Re-check now that we hold the lock. Another request may have finished
+    // generating (and released the lock) between our first read and our
+    // acquiring it; without this we'd produce a second fact inside the same
+    // 60s window.
+    latestFact = await latestFactFor(userId);
+    if (latestFact && isFresh(latestFact)) {
+      return { status: "fresh", fact: latestFact };
+    }
+
     const content = await generateMovieFact(user.favoriteMovie, GENERATION_BUDGET_MS);
     const fact = await prisma.fact.create({
       data: { userId, content },
       select: { content: true, createdAt: true },
     });
-    await clearLock(userId);
     return { status: "generated", fact };
-  } catch (err) {
-    await clearLock(userId);
-    const message =
-      "We couldn't generate a new fact right now. Please try again in a moment.";
-    if (latestFact) {
-      // Fall back to the last known fact rather than failing the request.
-      return { status: "error", message, fact: latestFact };
-    }
-    return { status: "error", message, fact: null };
+  } catch {
+    // Fall back to the last known fact (if any) rather than failing outright.
+    return {
+      status: "error",
+      message: "We couldn't generate a new fact right now. Please try again in a moment.",
+      fact: latestFact,
+    };
+  } finally {
+    await releaseLock(userId, lockedAt);
   }
+}
+
+function isFresh(fact: FactRecord): boolean {
+  return Date.now() - fact.createdAt.getTime() < CACHE_WINDOW_MS;
 }
 
 function latestFactFor(userId: string): Promise<FactRecord | null> {
@@ -99,9 +112,20 @@ function latestFactFor(userId: string): Promise<FactRecord | null> {
   });
 }
 
-function clearLock(userId: string) {
-  return prisma.user.update({
-    where: { id: userId },
-    data: { generationStartedAt: null },
-  });
+/**
+ * Releases the lock only if it is still the one *we* set (matched by its
+ * exact timestamp). If our generation outlived the stale window and another
+ * request took the lock over, this is a no-op instead of wiping their lock.
+ * A failed release is swallowed: it must not turn a saved fact into a 500,
+ * and the stale-lock timeout recovers on its own.
+ */
+async function releaseLock(userId: string, lockedAt: Date): Promise<void> {
+  try {
+    await prisma.user.updateMany({
+      where: { id: userId, generationStartedAt: lockedAt },
+      data: { generationStartedAt: null },
+    });
+  } catch {
+    // Logged once structured logging exists (see logger.ts).
+  }
 }
