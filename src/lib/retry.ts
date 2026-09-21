@@ -7,6 +7,8 @@ export type RetryOptions = {
   /** First backoff delay; doubles each retry, with up to 25% jitter shaved off. */
   baseDelayMs: number;
   isRetryable: (err: unknown) => boolean;
+  /** Called just before sleeping for a retry (e.g. for logging). */
+  onRetry?: (err: unknown, attempt: number, delayMs: number) => void;
 };
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -36,6 +38,7 @@ export async function retryWithinBudget<T>(
       const delay = opts.baseDelayMs * 2 ** (n - 1) * (1 - Math.random() * 0.25);
       // Not enough budget left to sleep and still make a meaningful attempt.
       if (deadline - Date.now() <= delay) throw err;
+      opts.onRetry?.(err, n, delay);
       await sleep(delay);
     }
   }

@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { retryWithinBudget } from "@/lib/retry";
+import { logger, errorFields } from "@/lib/logger";
 
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
@@ -67,6 +68,11 @@ export async function generateMovieFact(
       attemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
       baseDelayMs: BASE_RETRY_DELAY_MS,
       isRetryable: isTransient,
+      onRetry: (err, attempt, delayMs) =>
+        logger.warn(
+          { event: "openai_retry", attempt, delayMs: Math.round(delayMs), ...errorFields(err) },
+          "retrying OpenAI request",
+        ),
     },
   );
 

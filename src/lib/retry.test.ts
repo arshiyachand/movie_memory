@@ -89,4 +89,19 @@ describe("retryWithinBudget", () => {
     // A later attempt is capped by what is left, never the full 5s.
     expect(Math.max(...timeouts.slice(1))).toBeLessThan(opts.attemptTimeoutMs);
   });
+
+  it("calls onRetry before each retry, but not for the final failure", async () => {
+    const onRetry = vi.fn();
+    const attempt = vi.fn().mockRejectedValue(new Error("transient"));
+
+    const promise = retryWithinBudget(attempt, { ...opts, onRetry });
+    const assertion = expect(promise).rejects.toThrow("transient");
+    await vi.runAllTimersAsync();
+    await assertion;
+
+    // 3 attempts => 2 retries
+    expect(onRetry).toHaveBeenCalledTimes(2);
+    expect(onRetry).toHaveBeenNthCalledWith(1, expect.any(Error), 1, expect.any(Number));
+    expect(onRetry).toHaveBeenNthCalledWith(2, expect.any(Error), 2, expect.any(Number));
+  });
 });

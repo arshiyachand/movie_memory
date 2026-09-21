@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { generateMovieFact } from "@/lib/openai";
+import { logger, errorFields } from "@/lib/logger";
 
 // A stored fact is served straight from cache if it's younger than this.
 export const CACHE_WINDOW_MS = 60_000;
@@ -35,6 +36,10 @@ export type FactResult =
  * rationale (why this is a DB flag and not an in-memory lock).
  */
 export async function getOrGenerateFact(userId: string): Promise<FactResult> {
+  const startedAt = Date.now();
+  const log = (event: string, extra: Record<string, unknown> = {}) =>
+    logger.info({ event, userId, durationMs: Date.now() - startedAt, ...extra });
+
   const user = await prisma.user.findUniqueOrThrow({
     where: { id: userId },
     select: { favoriteMovie: true },
@@ -46,6 +51,7 @@ export async function getOrGenerateFact(userId: string): Promise<FactResult> {
 
   let latestFact = await latestFactFor(userId);
   if (latestFact && isFresh(latestFact)) {
+    log("cache_hit", { source: "initial" });
     return { status: "fresh", fact: latestFact };
   }
 
@@ -69,8 +75,11 @@ export async function getOrGenerateFact(userId: string): Promise<FactResult> {
   if (count === 0) {
     // Someone else (another request, another instance) is already
     // generating. Don't call OpenAI again — hand back whatever we have.
+    log("lock_contended");
     return { status: "in_progress", fact: latestFact };
   }
+
+  log("lock_acquired");
 
   try {
     // Re-check now that we hold the lock. Another request may have finished
@@ -79,6 +88,7 @@ export async function getOrGenerateFact(userId: string): Promise<FactResult> {
     // 60s window.
     latestFact = await latestFactFor(userId);
     if (latestFact && isFresh(latestFact)) {
+      log("cache_hit", { source: "after_lock" });
       return { status: "fresh", fact: latestFact };
     }
 
@@ -87,8 +97,13 @@ export async function getOrGenerateFact(userId: string): Promise<FactResult> {
       data: { userId, content },
       select: { content: true, createdAt: true },
     });
+    log("fact_generated");
     return { status: "generated", fact };
-  } catch {
+  } catch (err) {
+    logger.error(
+      { event: "openai_error", userId, durationMs: Date.now() - startedAt, ...errorFields(err) },
+      "fact generation failed",
+    );
     // Fall back to the last known fact (if any) rather than failing outright.
     return {
       status: "error",
@@ -125,7 +140,7 @@ async function releaseLock(userId: string, lockedAt: Date): Promise<void> {
       where: { id: userId, generationStartedAt: lockedAt },
       data: { generationStartedAt: null },
     });
-  } catch {
-    // Logged once structured logging exists (see logger.ts).
+  } catch (err) {
+    logger.warn({ event: "lock_release_failed", userId, ...errorFields(err) }, "could not release lock");
   }
 }

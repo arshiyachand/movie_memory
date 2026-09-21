@@ -21,8 +21,15 @@ vi.mock("@/lib/openai", () => ({
   generateMovieFact: vi.fn(),
 }));
 
+// Keep the real errorFields (scrubbing) but capture what would be logged.
+vi.mock("@/lib/logger", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/logger")>()),
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
 import { prisma } from "@/lib/prisma";
 import { generateMovieFact } from "@/lib/openai";
+import { logger } from "@/lib/logger";
 import {
   getOrGenerateFact,
   CACHE_WINDOW_MS,
@@ -32,6 +39,7 @@ import {
 
 const mockPrisma = vi.mocked(prisma, true);
 const mockGenerateMovieFact = vi.mocked(generateMovieFact);
+const mockLogger = vi.mocked(logger, true);
 
 const USER_ID = "user-1";
 
@@ -222,5 +230,48 @@ describe("getOrGenerateFact — failure handling", () => {
       fact: null,
       message: expect.stringContaining("try again"),
     });
+  });
+});
+
+describe("getOrGenerateFact — structured logging", () => {
+  it("logs cache_hit with userId and durationMs on a fresh fact", async () => {
+    mockUser();
+    mockPrisma.fact.findFirst.mockResolvedValue({ content: "c", createdAt: new Date() } as never);
+
+    await getOrGenerateFact(USER_ID);
+
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "cache_hit", userId: USER_ID, durationMs: expect.any(Number) }),
+    );
+  });
+
+  it("logs lock_acquired when it wins the lock and lock_contended when it loses", async () => {
+    mockUser();
+    mockPrisma.fact.findFirst.mockResolvedValue(null);
+    mockPrisma.user.updateMany.mockResolvedValueOnce({ count: 0 } as never);
+    await getOrGenerateFact(USER_ID);
+    expect(mockLogger.info).toHaveBeenCalledWith(expect.objectContaining({ event: "lock_contended", userId: USER_ID }));
+
+    mockPrisma.user.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockGenerateMovieFact.mockResolvedValue("fact");
+    mockPrisma.fact.create.mockResolvedValue({ content: "fact", createdAt: new Date() } as never);
+    await getOrGenerateFact(USER_ID);
+    expect(mockLogger.info).toHaveBeenCalledWith(expect.objectContaining({ event: "lock_acquired", userId: USER_ID }));
+  });
+
+  it("logs openai_error with status and a scrubbed message — never the API key", async () => {
+    mockUser();
+    mockPrisma.fact.findFirst.mockResolvedValue(null);
+    mockPrisma.user.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockGenerateMovieFact.mockRejectedValue(
+      Object.assign(new Error("401 Incorrect API key provided: sk-proj-abc***xyz"), { status: 401 }),
+    );
+
+    await getOrGenerateFact(USER_ID);
+
+    const [fields] = mockLogger.error.mock.calls[0];
+    expect(fields).toMatchObject({ event: "openai_error", userId: USER_ID, errorStatus: 401 });
+    expect(JSON.stringify(fields)).not.toContain("sk-proj");
+    expect(JSON.stringify(fields)).toContain("sk-[redacted]");
   });
 });
