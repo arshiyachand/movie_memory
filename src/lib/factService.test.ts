@@ -14,6 +14,8 @@ vi.mock("@/lib/prisma", () => ({
     fact: {
       findFirst: vi.fn(),
       create: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      deleteMany: vi.fn(),
     },
   },
 }));
@@ -35,6 +37,7 @@ import {
   getOrGenerateFact,
   peekFact,
   CACHE_WINDOW_MS,
+  FACT_RETENTION,
   LOCK_STALE_MS,
   GENERATION_BUDGET_MS,
 } from "@/lib/factService";
@@ -369,5 +372,51 @@ describe("peekFact — side-effect-free read", () => {
 
     expect(await peekFact(USER_ID)).toEqual({ fact: null, generating: false });
     expect(mockPrisma.fact.findFirst).not.toHaveBeenCalled();
+  });
+});
+
+describe("getOrGenerateFact — fact retention", () => {
+  function generateOnce() {
+    mockUser();
+    mockPrisma.fact.findFirst.mockResolvedValue(null);
+    mockPrisma.user.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockGenerateMovieFact.mockResolvedValue("fact");
+    mockPrisma.fact.create.mockResolvedValue({ content: "fact", createdAt: new Date() } as never);
+  }
+
+  it("deletes facts beyond the newest FACT_RETENTION after generating", async () => {
+    generateOnce();
+    mockPrisma.fact.findMany.mockResolvedValue([{ id: "old-1" }, { id: "old-2" }] as never);
+
+    await getOrGenerateFact(USER_ID);
+
+    expect(mockPrisma.fact.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: USER_ID }, skip: FACT_RETENTION }),
+    );
+    expect(mockPrisma.fact.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: ["old-1", "old-2"] } },
+    });
+  });
+
+  it("does not delete anything when the user is within the limit", async () => {
+    generateOnce();
+    mockPrisma.fact.findMany.mockResolvedValue([] as never);
+
+    await getOrGenerateFact(USER_ID);
+
+    expect(mockPrisma.fact.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("still returns the new fact if pruning fails", async () => {
+    generateOnce();
+    mockPrisma.fact.findMany.mockRejectedValue(new Error("db hiccup"));
+
+    const result = await getOrGenerateFact(USER_ID);
+
+    expect(result.status).toBe("generated");
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "fact_prune_failed" }),
+      expect.any(String),
+    );
   });
 });

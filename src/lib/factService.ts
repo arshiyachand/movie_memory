@@ -11,6 +11,10 @@ export const CACHE_WINDOW_MS = 60_000;
 // allowed to retry instead of being blocked forever.
 export const LOCK_STALE_MS = 15_000;
 
+// Only the latest N facts per user are kept, so the table can't grow forever.
+// The cache and dashboard only ever need the newest one.
+export const FACT_RETENTION = 20;
+
 // Slack for the work after OpenAI returns (insert Fact, clear lock) and for
 // clock differences between instances.
 const LOCK_SAFETY_MARGIN_MS = 5_000;
@@ -111,6 +115,7 @@ export async function getOrGenerateFact(userId: string): Promise<FactResult> {
       select: { content: true, createdAt: true },
     });
     log("fact_generated");
+    await pruneOldFacts(userId);
     return { status: "generated", fact };
   } catch (err) {
     logger.error(
@@ -164,6 +169,26 @@ export function getLatestFact(userId: string, movie: string): Promise<FactRecord
     orderBy: { createdAt: "desc" },
     select: { content: true, createdAt: true },
   });
+}
+
+/**
+ * Best-effort retention: delete everything beyond the newest FACT_RETENTION
+ * facts. Failure is logged and ignored; the next generation tries again.
+ */
+async function pruneOldFacts(userId: string): Promise<void> {
+  try {
+    const stale = await prisma.fact.findMany({
+      where: { userId },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      skip: FACT_RETENTION,
+      select: { id: true },
+    });
+    if (stale.length > 0) {
+      await prisma.fact.deleteMany({ where: { id: { in: stale.map((f) => f.id) } } });
+    }
+  } catch (err) {
+    logger.warn({ event: "fact_prune_failed", userId, ...errorFields(err) }, "could not prune old facts");
+  }
 }
 
 async function movieChanged(userId: string, movie: string): Promise<boolean> {

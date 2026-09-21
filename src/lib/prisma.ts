@@ -1,5 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
+import { poolConfig } from "@/lib/dbPool";
 
 // Prevent creating a new PrismaClient (and a new connection pool) on every
 // hot-reload in dev. In production each serverless/server instance gets its
@@ -12,7 +13,9 @@ const globalForPrisma = globalThis as unknown as {
 // explicit driver adapter to connect. DATABASE_URL is only read here, at
 // runtime — prisma.config.ts (a separate, CLI-only file) is what
 // `prisma migrate`/`prisma generate` use.
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+// Pool size is explicit (see dbPool.ts) because every server instance opens
+// its own pool against the same database.
+const adapter = new PrismaPg(poolConfig());
 
 export const prisma = globalForPrisma.prisma ?? new PrismaClient({ adapter });
 
