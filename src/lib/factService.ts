@@ -128,6 +128,31 @@ export async function getOrGenerateFact(userId: string): Promise<FactResult> {
   }
 }
 
+export type FactPeek = { fact: FactRecord | null; generating: boolean };
+
+/**
+ * Side-effect-free read for polling: the latest fact for the user's current
+ * movie, and whether a generation is in flight (a lock younger than
+ * LOCK_STALE_MS). Never generates and never touches the lock, so clients can
+ * call it as often as they like.
+ */
+export async function peekFact(userId: string): Promise<FactPeek> {
+  const user = await prisma.user.findUniqueOrThrow({
+    where: { id: userId },
+    select: { favoriteMovie: true, generationStartedAt: true },
+  });
+
+  const generating =
+    user.generationStartedAt !== null &&
+    Date.now() - user.generationStartedAt.getTime() < LOCK_STALE_MS;
+
+  const fact = user.favoriteMovie
+    ? await getLatestFact(userId, normalizeMovieTitle(user.favoriteMovie))
+    : null;
+
+  return { fact, generating };
+}
+
 function isFresh(fact: FactRecord): boolean {
   return Date.now() - fact.createdAt.getTime() < CACHE_WINDOW_MS;
 }

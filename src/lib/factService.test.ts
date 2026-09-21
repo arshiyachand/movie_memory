@@ -33,6 +33,7 @@ import { generateMovieFact } from "@/lib/openai";
 import { logger } from "@/lib/logger";
 import {
   getOrGenerateFact,
+  peekFact,
   CACHE_WINDOW_MS,
   LOCK_STALE_MS,
   GENERATION_BUDGET_MS,
@@ -327,5 +328,46 @@ describe("getOrGenerateFact — structured logging", () => {
     expect(fields).toMatchObject({ event: "openai_error", userId: USER_ID, errorStatus: 401 });
     expect(JSON.stringify(fields)).not.toContain("sk-proj");
     expect(JSON.stringify(fields)).toContain("sk-[redacted]");
+  });
+});
+
+describe("peekFact — side-effect-free read", () => {
+  it("reports generating while a fresh lock is held, and never writes or calls OpenAI", async () => {
+    mockPrisma.user.findUniqueOrThrow.mockResolvedValue({
+      favoriteMovie: "The Matrix",
+      generationStartedAt: new Date(Date.now() - 2_000),
+    } as never);
+    mockPrisma.fact.findFirst.mockResolvedValue({ content: "c", createdAt: new Date() } as never);
+
+    const peek = await peekFact(USER_ID);
+
+    expect(peek.generating).toBe(true);
+    expect(peek.fact).toMatchObject({ content: "c" });
+    expect(mockGenerateMovieFact).not.toHaveBeenCalled();
+    expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.fact.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["no lock", null],
+    ["a stale (abandoned) lock", new Date(Date.now() - (LOCK_STALE_MS + 1_000))],
+  ])("reports not generating with %s", async (_label, startedAt) => {
+    mockPrisma.user.findUniqueOrThrow.mockResolvedValue({
+      favoriteMovie: "The Matrix",
+      generationStartedAt: startedAt,
+    } as never);
+    mockPrisma.fact.findFirst.mockResolvedValue(null);
+
+    expect((await peekFact(USER_ID)).generating).toBe(false);
+  });
+
+  it("only looks at facts for the current movie, and returns none when no movie is set", async () => {
+    mockPrisma.user.findUniqueOrThrow.mockResolvedValue({
+      favoriteMovie: null,
+      generationStartedAt: null,
+    } as never);
+
+    expect(await peekFact(USER_ID)).toEqual({ fact: null, generating: false });
+    expect(mockPrisma.fact.findFirst).not.toHaveBeenCalled();
   });
 });
