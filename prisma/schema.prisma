@@ -1,0 +1,95 @@
+// Prisma schema for Movie Memory
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Connection URL lives in prisma.config.ts (Prisma 7); PrismaClient itself
+// gets it via the @prisma/adapter-pg driver adapter at runtime (src/lib/prisma.ts).
+datasource db {
+  provider = "postgresql"
+}
+
+// --- NextAuth.js required models (Prisma adapter, database session strategy) ---
+// Database sessions (rather than JWT) are used so that every server-side read of
+// the session always reflects the current User row in Postgres. This matters for
+// the onboarding gate: right after a user submits their favorite movie, the very
+// next request must see it, with no stale-JWT-cookie lag.
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// --- App models ---
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+
+  // Set during onboarding. Null/undefined means the user hasn't onboarded yet,
+  // which is what /onboarding vs /dashboard routing checks.
+  favoriteMovie String?
+
+  // Postgres-backed "generation in progress" lock for the fact-generation
+  // endpoint. Lives on User (not Fact) because it guards the *next*
+  // generation, which has no Fact row yet. Nullable; cleared after each
+  // generation attempt (success or failure). See README for why this is a
+  // DB column and not an in-memory lock.
+  generationStartedAt DateTime?
+
+  accounts Account[]
+  sessions Session[]
+  facts    Fact[]
+
+  createdAt DateTime @default(now())
+}
+
+model Fact {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  content String
+
+  createdAt DateTime @default(now())
+
+  // Fetching "the most recent fact for a user" is the hot path for both the
+  // cache check and the dashboard, so index userId + createdAt together.
+  @@index([userId, createdAt])
+}
