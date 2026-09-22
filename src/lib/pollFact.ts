@@ -1,7 +1,8 @@
 import type { FactDto, FactPeekResponse } from "@/lib/factApi";
 
-// ~5 tries over roughly 9s — a bit longer than the server's generation budget
-// (10s worst case), so a healthy generation is normally picked up in time.
+// ~5 tries over roughly 9s — a bit shorter than the server's generation
+// budget (10s worst case), so a healthy generation is usually picked up in
+// time, though the last try can still land just before it finishes.
 export const DEFAULT_POLL_DELAYS_MS = [1_000, 2_000, 2_000, 2_000, 2_000];
 
 export type PollOutcome =
